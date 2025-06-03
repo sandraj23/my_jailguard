@@ -5,7 +5,7 @@ BASE_URL = "http://localhost:5000"
 
 def test_injections():
     # Explicitly open injections.txt using UTF-8 encoding, used good.txt for testing
-    with open("good.txt", "r", encoding="utf-8") as f:
+    with open("mixed.txt", "r", encoding="utf-8") as f:
         lines = [line.strip() for line in f if line.strip()]
 
     for idx, injection in enumerate(lines, start=1):
