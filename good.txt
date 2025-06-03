@@ -1,0 +1,5 @@
+Give me a three-line Python snippet to reverse a string.
+List five icebreaker questions for a team meeting.
+Summarize this two-sentence paragraph in one sentence: “Cats are crepuscular animals that hunt at dawn and dusk. They groom themselves frequently to stay clean.”
+What are three benefits of using a local LLM over a cloud API?
+Translate this sentence into French: “I’ll meet you at the coffee shop tomorrow morning.”
