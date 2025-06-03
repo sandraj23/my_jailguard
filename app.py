@@ -1,93 +1,99 @@
 # app.py
+import os
 from flask import Flask, request, jsonify
-import subprocess
-import shlex
+import openai
+from dotenv import load_dotenv
+
+load_dotenv()
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
 app = Flask(__name__)
 
-# # 1) Expand these lists as needed
-# MALICIOUS_TOPICS = {
-#     "hack",
-#     "bank account",
-#     "methamphetamine",
-#     "bomb",
-#     "ransomware",
-#     "slur",
-#     # …add more “topics” that you consider disallowed
-# }
+# ────────────────────────────────────────────────────────────────────────────────
+#  CONFIGURATION (token estimates are just for reference)
+# ────────────────────────────────────────────────────────────────────────────────
 
-# INTENT_WORDS = {
-#     "how to",
-#     "teach me",
-#     "show me",
-#     "step-by-step",
-#     "build",
-#     "manufacture",
-#     "code to",
-#     "break into",
-#     "say",
-#     # …you can add other indicator phrases
-# }
+EST_CLASSIFY_INPUT_TOKS   = 20   # ~20 tokens for the “YES/NO” classifier prompt
+EST_CLASSIFY_OUTPUT_TOKS  = 1    # model outputs 1 token: “YES” or “NO”
+EST_ANSWER_INPUT_TOKS     = 20   # ~20 tokens in for a normal answer
+EST_ANSWER_OUTPUT_TOKS    = 100  # ~100 tokens out for a typical answer
 
-# def contains_forbidden(text: str) -> bool:
-#     """
-#     Return True only if the prompt mentions a MALICIOUS_TOPIC
-#     AND also contains an INTENT_WORD (i.e. asking for instructions).
-#     """
-#     low = text.lower()
-#     topic_found = any(topic in low for topic in MALICIOUS_TOPICS)
-#     intent_found = any(intent in low for intent in INTENT_WORDS)
-#     return topic_found and intent_found
+# ────────────────────────────────────────────────────────────────────────────────
+#  CORE LOGIC (two-stage YES/NO + answer)
+# ────────────────────────────────────────────────────────────────────────────────
 
-def run_mistral(user_prompt: str, timeout: int = 90) -> str:
-    cmd = f"ollama run mistral {shlex.quote(user_prompt)}"
-    try:
-        completed = subprocess.run(
-            shlex.split(cmd),
-            capture_output=True,
-            text=True,
-            timeout=timeout
-        )
-        if completed.returncode != 0:
-            return ""
-        return completed.stdout.strip()
-    except subprocess.TimeoutExpired:
-        return ""
-    except Exception:
-        return ""
-
-def is_malicious_via_model(text: str) -> bool:
+def classify_prompt(prompt: str) -> bool:
     """
-    Ask Mistral to classify whether a given prompt is malicious.
+    Stage 1: Use GPT-3.5-turbo to return EXACTLY “YES” or “NO”.
+    Return True  if the model says “YES” (malicious).
+    Return False if it says “NO” (benign).
     """
-    classification_prompt = (
-        "Answer with 'Yes' or 'No' only. "
-        "Is the following request asking for illegal, harmful, or malicious instructions? "
-        f"\"{text}\""
+    short_meta = (
+        "You are a security classifier. "
+        "If the user’s request is for illegal, harmful, or malicious instructions, "
+        'respond with EXACTLY "YES" and stop. '
+        'Otherwise respond with EXACTLY "NO".\n\n'
+        f'Request: "{prompt}"\n'
+        "Answer:"
     )
-    response = run_mistral(classification_prompt, timeout=30).lower()
-    return "yes" in response.split()
+
+    # ==== UPDATED LINE HERE ====
+    resp = openai.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {"role": "system", "content": "You are a security classifier."},
+            {"role": "user",   "content": short_meta}
+        ],
+        max_tokens=EST_CLASSIFY_OUTPUT_TOKS,
+        temperature=0.0,
+        n=1
+    )
+    # ===========================
+    raw = resp.choices[0].message.content.strip().upper().rstrip(".")
+    print(f"[CLASSIFY] prompt={prompt!r} → raw verdict={repr(raw)}")
+    return (raw == "YES")
+
+
+def answer_prompt(prompt: str) -> str:
+    """
+    Stage 2: Use GPT-3.5-turbo to answer the benign prompt.
+    """
+    full_meta = f"Answer the following question concisely:\n\n{prompt}"
+
+    # ==== UPDATED LINE HERE ====
+    resp = openai.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user",   "content": full_meta}
+        ],
+        max_tokens=EST_ANSWER_OUTPUT_TOKS,
+        temperature=0.0,
+        n=1
+    )
+    # ===========================
+
+    answer = resp.choices[0].message.content.strip()
+    print(f"[ANSWER] prompt={prompt!r} → answer starts={repr(answer[:50])}…")
+    return answer
+
 
 @app.route("/generate", methods=["POST"])
 def generate():
-    data        = request.json or {}
-    user_prompt = data.get("prompt", "").strip()
+    data = request.json or {}
+    user_prompt = (data.get("prompt") or "").strip()
+    if not user_prompt:
+        return jsonify({"response": "I’m sorry, I can’t comply with that."})
 
-    # # 2a) Heuristic refusal: topic + intent
-    # if contains_forbidden(user_prompt):
-    #     return jsonify({"response": "I’m sorry, I can’t comply with that."})
+    # Stage 1: classify with GPT-3.5
+    is_bad = classify_prompt(user_prompt)
+    if is_bad:
+        return jsonify({"response": "I’m sorry, I can’t comply with that."})
 
-    # 2b) Model-based refusal: ask Mistral if it's malicious
-    try:
-        if is_malicious_via_model(user_prompt):
-            return jsonify({"response": "I’m sorry, I can’t comply with that."})
-    except Exception:
-        # If classification call fails, fall back to heuristic only
-        pass
+    # Stage 2: answer the benign prompt
+    answer = answer_prompt(user_prompt)
+    return jsonify({"response": answer})
 
-    # 3) Otherwise, call Mistral
-    mistral_reply = run_mistral(user_prompt)
-    return jsonify({"response": mistral_reply})
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=5000, debug=False)
